@@ -1,0 +1,232 @@
+import { Injectable } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { FireIncident } from './fire-incident.entity';
+import { CreateIncidentDto } from './dto/create-incident.dto';
+
+@Injectable()
+export class IncidentsService {
+  constructor(
+    @InjectRepository(FireIncident)
+    private incidentsRepository: Repository<FireIncident>,
+  ) {}
+
+  async create(dto: CreateIncidentDto) {
+    const incident = this.incidentsRepository.create(dto);
+    return this.incidentsRepository.save(incident);
+  }
+
+  async findAll(barangay?: string) {
+    if (barangay && barangay !== 'All') {
+      return this.incidentsRepository.find({
+        where: { barangay },
+        order: { createdAt: 'DESC' },
+      });
+    }
+
+    return this.incidentsRepository.find({
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  async search(filters: {
+    barangay?: string;
+    cause?: string;
+    propertyType?: string;
+    startDate?: string;
+    endDate?: string;
+  }) {
+    const query = this.incidentsRepository.createQueryBuilder('incident');
+
+    if (filters.barangay && filters.barangay !== 'All') {
+      query.andWhere('incident.barangay = :barangay', {
+        barangay: filters.barangay,
+      });
+    }
+    if (filters.cause) {
+      query.andWhere('incident.cause ILIKE :cause', {
+        cause: `%${filters.cause}%`,
+      });
+    }
+    if (filters.propertyType) {
+      query.andWhere('incident.propertyType ILIKE :propertyType', {
+        propertyType: `%${filters.propertyType}%`,
+      });
+    }
+    if (filters.startDate) {
+      query.andWhere('incident.incidentDate >= :startDate', {
+        startDate: filters.startDate,
+      });
+    }
+    if (filters.endDate) {
+      query.andWhere('incident.incidentDate <= :endDate', {
+        endDate: filters.endDate,
+      });
+    }
+
+    query.orderBy('incident.incidentDate', 'DESC');
+    return query.getMany();
+  }
+
+  async getDashboardSummary() {
+    const incidents = await this.incidentsRepository.find();
+
+    const totalIncidents = incidents.length;
+
+    const totalEstimatedDamage = incidents.reduce(
+      (sum, item) => sum + Number(item.estimatedDamage || 0),
+      0,
+    );
+
+    const totalCasualties = incidents.reduce(
+      (sum, item) => sum + Number(item.casualties || 0),
+      0,
+    );
+
+    const totalInjuries = incidents.reduce(
+      (sum, item) => sum + Number(item.injuries || 0),
+      0,
+    );
+
+    const avgDamagePerIncident =
+      totalIncidents > 0
+        ? Math.round(totalEstimatedDamage / totalIncidents)
+        : 0;
+
+    const barangayCounts: Record<string, number> = {};
+    const causeCounts: Record<string, number> = {};
+    const propertyCounts: Record<string, number> = {};
+    const monthlyCounts: Record<string, number> = {};
+    const dayOfWeekCounts: Record<string, number> = {
+      Sun: 0, Mon: 0, Tue: 0, Wed: 0, Thu: 0, Fri: 0, Sat: 0,
+    };
+    const timeOfDayCounts: Record<string, number> = {
+      'Morning (6AM-12PM)': 0,
+      'Afternoon (12PM-6PM)': 0,
+      'Evening (6PM-12AM)': 0,
+      'Night (12AM-6AM)': 0,
+    };
+    const damageSeverity: Record<string, number> = {
+      'Minor (<₱10k)': 0,
+      'Moderate (₱10k-₱100k)': 0,
+      'Major (₱100k-₱500k)': 0,
+      'Catastrophic (≥₱500k)': 0,
+    };
+
+    const currentYear = new Date().getFullYear();
+    let thisYearCount = 0;
+    let lastYearCount = 0;
+
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    incidents.forEach((incident) => {
+      barangayCounts[incident.barangay] =
+        (barangayCounts[incident.barangay] || 0) + 1;
+
+      if (incident.cause) {
+        causeCounts[incident.cause] = (causeCounts[incident.cause] || 0) + 1;
+      }
+
+      if (incident.propertyType) {
+        propertyCounts[incident.propertyType] =
+          (propertyCounts[incident.propertyType] || 0) + 1;
+      }
+
+      // Monthly trend: group by YYYY-MM
+      if (incident.incidentDate) {
+        const month = incident.incidentDate.substring(0, 7);
+        monthlyCounts[month] = (monthlyCounts[month] || 0) + 1;
+
+        // Day of week
+        const date = new Date(incident.incidentDate);
+        if (!isNaN(date.getTime())) {
+          const dayName = dayNames[date.getDay()];
+          dayOfWeekCounts[dayName] = (dayOfWeekCounts[dayName] || 0) + 1;
+        }
+
+        // Year-over-year
+        const year = parseInt(incident.incidentDate.substring(0, 4));
+        if (year === currentYear) thisYearCount++;
+        if (year === currentYear - 1) lastYearCount++;
+      }
+
+      // Time of day
+      if (incident.incidentTime) {
+        const hour = parseInt(incident.incidentTime.split(':')[0]);
+        if (hour >= 6 && hour < 12) timeOfDayCounts['Morning (6AM-12PM)']++;
+        else if (hour >= 12 && hour < 18) timeOfDayCounts['Afternoon (12PM-6PM)']++;
+        else if (hour >= 18) timeOfDayCounts['Evening (6PM-12AM)']++;
+        else timeOfDayCounts['Night (12AM-6AM)']++;
+      }
+
+      // Damage severity
+      const dmg = Number(incident.estimatedDamage || 0);
+      if (dmg < 10000) damageSeverity['Minor (<₱10k)']++;
+      else if (dmg < 100000) damageSeverity['Moderate (₱10k-₱100k)']++;
+      else if (dmg < 500000) damageSeverity['Major (₱100k-₱500k)']++;
+      else damageSeverity['Catastrophic (≥₱500k)']++;
+    });
+
+    return {
+      totalIncidents,
+      totalEstimatedDamage,
+      totalCasualties,
+      totalInjuries,
+      avgDamagePerIncident,
+      barangayCounts,
+      causeCounts,
+      propertyCounts,
+      monthlyCounts,
+      dayOfWeekCounts,
+      timeOfDayCounts,
+      damageSeverity,
+      thisYearCount,
+      lastYearCount,
+    };
+  }
+
+  async getResponsePerformance() {
+    const incidents = await this.incidentsRepository.find({
+      order: { incidentDate: 'DESC' },
+    });
+
+    const withResponseData = incidents.filter(
+      (i) => i.alarmTime && i.responseTime,
+    );
+
+    const responseTimesMinutes = withResponseData
+      .map((i) => {
+        const alarm = this.timeToMinutes(i.alarmTime!);
+        const response = this.timeToMinutes(i.responseTime!);
+        return response - alarm;
+      })
+      .filter((m) => m >= 0);
+
+    const avgResponseTime =
+      responseTimesMinutes.length > 0
+        ? responseTimesMinutes.reduce((a, b) => a + b, 0) /
+          responseTimesMinutes.length
+        : 0;
+
+    const recentIncidents = withResponseData.slice(0, 20).map((i) => ({
+      id: i.id,
+      barangay: i.barangay,
+      date: i.incidentDate,
+      alarmTime: i.alarmTime,
+      responseTime: i.responseTime,
+      controlTime: i.controlTime,
+      fireOutTime: i.fireOutTime,
+    }));
+
+    return {
+      totalWithResponseData: withResponseData.length,
+      avgResponseTimeMinutes: Math.round(avgResponseTime * 10) / 10,
+      recentIncidents,
+    };
+  }
+
+  private timeToMinutes(time: string): number {
+    const parts = time.split(':');
+    return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+  }
+}
